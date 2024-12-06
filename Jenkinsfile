@@ -13,9 +13,9 @@ pipeline {
     environment {
         GITHUB_TOKEN = credentials('github-token-2')
         SERVER_HOST = "<server host>"
-        USER = 'jenkins'
-        POSTGRES_CONTAINER_NAME = 'pg_database'
-        DB_ADMIN_USER = 'admin'
+        USER = '<jenkins user>'
+        POSTGRES_CONTAINER_NAME = '<postgres database container name>'
+        DB_ADMIN_USER = '<database admin user>'
         VAULT_ADDR = 'http://<ip from docker network>:<vault port>'
     }
     stages {
@@ -90,7 +90,7 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
                 environment {
                     APPLICATION_NAME = '${APPLICATION_NAME}'
                     DOCKER_REGISTRY_PORT = '<docker registry port>'
-                    REPOSITORY_NAME = '<repo name>'
+                    REPOSITORY_NAME = '<nexus repo name>'
                     SERVER_HOST = '${SERVER_HOST}'
                     USER = '${USER}'
                 }
@@ -265,18 +265,18 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 
         stage('Configure databases') {
             when {
-                expression { params.CONFIGURE_DEV_DATABASES || params.CONFIGURE_PROD_DATABASES }
+                expression { params.CONFIGURE_DEV_DATABASE || params.CONFIGURE_PROD_DATABASE }
             }
             steps {
                 sshagent(['nas']) {
                     script {
-                        if (params.CONFIGURE_DEV_DATABASES) {
+                        if (params.CONFIGURE_DEV_DATABASE) {
                             echo "Configuring dev database..."
                             env.DATABASE_USER_DEV = "${APPLICATION_NAME.replace('-', '_')}_owner_dev"
                             setupDatabase('dev', "${DATABASE_USER_DEV}", "${env.DATABASE_PASSWORD_DEV}")
                         }
 
-                        if (params.CONFIGURE_PROD_DATABASES) {
+                        if (params.CONFIGURE_PROD_DATABASE) {
                             echo "Configuring prod database..."
                             env.DATABASE_USER_PROD = "${APPLICATION_NAME.replace('-', '_')}_owner_prod"
                             setupDatabase('prod', "${DATABASE_USER_PROD}", "${env.DATABASE_PASSWORD_PROD}")
@@ -288,20 +288,20 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 
         stage('Save secrets to vault') {
             when {
-               expression { params.CONFIGURE_DEV_DATABASES || params.CONFIGURE_PROD_DATABASES }
+               expression { params.CONFIGURE_DEV_DATABASE || params.CONFIGURE_PROD_DATABASE }
             }
             steps {
                 withCredentials([string(credentialsId: 'vault-token', variable: 'VAULT_TOKEN')]) {
                     script {
                         def secretsData = [:]
 
-                        if (params.CONFIGURE_DEV_DATABASES) {
+                        if (params.CONFIGURE_DEV_DATABASE) {
                             echo "Adding dev database secrets to data..."
                             secretsData["username.dev"] = DATABASE_USER_DEV
                             secretsData["password.dev"] = env.DATABASE_PASSWORD_DEV
                         }
 
-                        if (params.CONFIGURE_PROD_DATABASES) {
+                        if (params.CONFIGURE_PROD_DATABASE) {
                             echo "Adding prod database secrets to data..."
                             secretsData["username.prod"] = DATABASE_USER_PROD
                             secretsData["password.prod"] = env.DATABASE_PASSWORD_PROD
@@ -325,8 +325,8 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 }
 
 def setupDatabase(dbName, dbUserName, dbUserPassword) {
-    echo '${dbUserPassword}'
+    def schemaName = env.APPLICATION_NAME.replaceAll('-', '_')
     sh """
-    ssh -o StrictHostKeyChecking=no ${env.USER}@${env.SERVER_HOST} "docker exec ${env.POSTGRES_CONTAINER_NAME} psql -U ${env.DB_ADMIN_USER} -d ${dbName} -c \\"CREATE USER ${dbUserName} WITH PASSWORD '${dbUserPassword}'; CREATE SCHEMA IF NOT EXISTS ${env.APPLICATION_NAME}; ALTER SCHEMA ${env.APPLICATION_NAME} OWNER TO ${dbUserName}; GRANT ALL PRIVILEGES ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT CONNECT ON DATABASE ${dbName} TO ${dbUserName}; GRANT USAGE ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT CREATE ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; ALTER DEFAULT PRIVILEGES IN SCHEMA ${env.APPLICATION_NAME} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${dbUserName}; ALTER ROLE ${dbUserName} SET search_path TO ${env.APPLICATION_NAME};\\""
+    ssh -o StrictHostKeyChecking=no ${env.USER}@${env.SERVER_HOST} "docker exec ${env.POSTGRES_CONTAINER_NAME} psql -U ${env.DB_ADMIN_USER} -d ${dbName} -c \\"CREATE USER ${dbUserName} WITH PASSWORD '${dbUserPassword}'; CREATE SCHEMA IF NOT EXISTS ${schemaName}; ALTER SCHEMA ${schemaName} OWNER TO ${dbUserName}; GRANT ALL PRIVILEGES ON SCHEMA ${schemaName} TO ${dbUserName}; GRANT CONNECT ON DATABASE ${dbName} TO ${dbUserName}; GRANT USAGE ON SCHEMA ${schemaName} TO ${dbUserName}; GRANT CREATE ON SCHEMA ${schemaName} TO ${dbUserName}; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schemaName} TO ${dbUserName}; ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${dbUserName}; ALTER ROLE ${dbUserName} SET search_path TO ${schemaName};\\""
     """
 }
