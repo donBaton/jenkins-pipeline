@@ -12,29 +12,20 @@ pipeline {
     }
     environment {
         GITHUB_TOKEN = credentials('github-token-2')
-        SERVER_HOST = "<server host>"
-        USER = 'jenkins'
-        POSTGRES_CONTAINER_NAME = 'pg_database'
-        DB_ADMIN_USER = 'admin'
-        VAULT_ADDR = 'http://<ip from docker network>:<vault port>'
+        SERVER_HOST = "<server ip>"
+        USER = '<jenkins user>'
+        POSTGRES_CONTAINER_NAME = '<postgres container name>'
+        DB_ADMIN_USER = '<postgres admin username>'
+        DOCKER_REGISTRY_PORT = '<docker registry port>'
+        VAULT_INNER_IP = '<vault docker network port>'
+        REPOSITORY_NAME = '<nexus repository name>'
     }
     stages {
-        stage('Check input parameters and preparation') {
+        stage('Preparation') {
             steps {
                 script {
                     env.APPLICATION_NAME = params.PROJECT_NAME.toLowerCase().replaceAll(' ', '-')
                     echo "Application name: ${env.APPLICATION_NAME}"
-
-                    def port = params.DEFAULT_PORT
-                    if (!port.isInteger()) {
-                        error("PORT must contain only numbers. You entered: ${port}")
-                    }
-                    port = port.toInteger()
-                    if (port < 1024 || port > 65535) {
-                        error("PORT must be between 1024 and 65535. You entered: ${port}")
-                    }
-
-                    echo "PORT is valid: ${port}"
                 }
             }
         }
@@ -44,11 +35,35 @@ pipeline {
                 expression { params.CREATE_GITHUB_REPO }
             }
             steps {
-                echo "Creating GitHub repository..."
+                echo "Creating GitHub repository from template..."
+
                 sh """
-                curl -X POST -H "Authorization: token ${GITHUB_TOKEN}" \
-                     -d '{"name": "${APPLICATION_NAME}", "private": true}' \
-                     https://api.github.com/user/repos
+                    curl -X POST -H "Authorization: token ${GITHUB_TOKEN}" \
+                    -d '{"name": "${APPLICATION_NAME}", "private": true}' \
+                    https://api.github.com/user/repos
+
+                    rm -rf springboot-template ${APPLICATION_NAME}
+
+                    git clone -b master git@github.com:donBaton/springboot-template.git
+                    mv springboot-template ${APPLICATION_NAME}
+                    cd ${APPLICATION_NAME}
+
+                    rm -rf .git
+                    git init
+                    git branch -m develop
+
+                    git config user.name 'jenkins'
+                    git config user.email '<jenkins email>'
+
+                    sed -i 's|<artifactId>template</artifactId>|<artifactId>${APPLICATION_NAME}</artifactId>|g' pom.xml
+                    sed -i 's|COPY target/template-|COPY target/${APPLICATION_NAME}-|g' Dockerfile
+                    sed -i 's|name: template|name: ${APPLICATION_NAME}|g' src/main/resources/application.yml
+
+                    git add .
+                    git commit -m "init"
+
+                    git remote add origin git@github.com:donBaton/${APPLICATION_NAME}.git
+                    git push -u origin develop
                 """
             }
         }
@@ -59,10 +74,21 @@ pipeline {
             }
             steps {
                 script {
+                    def port = params.DEFAULT_PORT
+                    if (!port.isInteger()) {
+                        error("PORT must contain only numbers. You entered: ${port}")
+                    }
+                    port = port.toInteger()
+                    if (port < 1024 || port > 65535) {
+                        error("PORT must be between 1024 and 65535. You entered: ${port}")
+                    }
+
+                    echo "PORT is valid: ${port}"
+
                     def jobScript = """
 pipelineJob("${APPLICATION_NAME} - build and deploy") {
     parameters {
-        stringParam('BRANCH', 'master', 'Branch')
+        stringParam('BRANCH', 'develop', 'Branch')
         choiceParam('BUILD_TYPE', ['SNAPSHOT', 'RELEASE', 'PATCH'], 'Select the build type')
         choiceParam('ENVIRONMENT', ['DEV', 'PROD', 'SKIP'], 'Select environment or skip deploy')
         stringParam('DEPLOY_PORT', '${params.DEFAULT_PORT}', 'Port to deploy')
@@ -75,7 +101,7 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
                 agent any
 
                 parameters {
-                    string(name: 'BRANCH', defaultValue: 'master', description: 'Branch')
+                    string(name: 'BRANCH', defaultValue: 'develop', description: 'Branch')
                     choice(name: 'BUILD_TYPE', choices: ['SNAPSHOT', 'RELEASE', 'PATCH'], description: 'Select the build type')
                     choice(name: 'ENVIRONMENT', choices: ['DEV', 'PROD', 'SKIP'], description: 'Select environment or skip deploy')
                     string(name: 'DEPLOY_PORT', defaultValue: '${params.DEFAULT_PORT}', description: 'Port for the application')
@@ -89,8 +115,8 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 
                 environment {
                     APPLICATION_NAME = '${APPLICATION_NAME}'
-                    DOCKER_REGISTRY_PORT = '<docker registry port>'
-                    REPOSITORY_NAME = '<repo name>'
+                    DOCKER_REGISTRY_PORT = '${DOCKER_REGISTRY_PORT}'
+                    REPOSITORY_NAME = '${REPOSITORY_NAME}'
                     SERVER_HOST = '${SERVER_HOST}'
                     USER = '${USER}'
                 }
@@ -231,7 +257,7 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
                                 sh \"\"\"
                                 #!/bin/bash
                                 git config user.name "jenkins"
-                                git config user.email "nkzhukov@gmail.com"
+                                git config user.email "<jenkins email>"
                                 git add pom.xml
                                 git commit -m "Increment version to \${NEW_VERSION}"
                                 git push origin \${BRANCH}
@@ -265,18 +291,18 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 
         stage('Configure databases') {
             when {
-                expression { params.CONFIGURE_DEV_DATABASES || params.CONFIGURE_PROD_DATABASES }
+                expression { params.CONFIGURE_DEV_DATABASE || params.CONFIGURE_PROD_DATABASE }
             }
             steps {
                 sshagent(['nas']) {
                     script {
-                        if (params.CONFIGURE_DEV_DATABASES) {
+                        if (params.CONFIGURE_DEV_DATABASE) {
                             echo "Configuring dev database..."
                             env.DATABASE_USER_DEV = "${APPLICATION_NAME.replace('-', '_')}_owner_dev"
                             setupDatabase('dev', "${DATABASE_USER_DEV}", "${env.DATABASE_PASSWORD_DEV}")
                         }
 
-                        if (params.CONFIGURE_PROD_DATABASES) {
+                        if (params.CONFIGURE_PROD_DATABASE) {
                             echo "Configuring prod database..."
                             env.DATABASE_USER_PROD = "${APPLICATION_NAME.replace('-', '_')}_owner_prod"
                             setupDatabase('prod', "${DATABASE_USER_PROD}", "${env.DATABASE_PASSWORD_PROD}")
@@ -288,20 +314,20 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 
         stage('Save secrets to vault') {
             when {
-               expression { params.CONFIGURE_DEV_DATABASES || params.CONFIGURE_PROD_DATABASES }
+               expression { params.CONFIGURE_DEV_DATABASE || params.CONFIGURE_PROD_DATABASE }
             }
             steps {
                 withCredentials([string(credentialsId: 'vault-token', variable: 'VAULT_TOKEN')]) {
                     script {
                         def secretsData = [:]
 
-                        if (params.CONFIGURE_DEV_DATABASES) {
+                        if (params.CONFIGURE_DEV_DATABASE) {
                             echo "Adding dev database secrets to data..."
                             secretsData["username.dev"] = DATABASE_USER_DEV
                             secretsData["password.dev"] = env.DATABASE_PASSWORD_DEV
                         }
 
-                        if (params.CONFIGURE_PROD_DATABASES) {
+                        if (params.CONFIGURE_PROD_DATABASE) {
                             echo "Adding prod database secrets to data..."
                             secretsData["username.prod"] = DATABASE_USER_PROD
                             secretsData["password.prod"] = env.DATABASE_PASSWORD_PROD
@@ -314,7 +340,7 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
                             curl --header "X-Vault-Token: ${VAULT_TOKEN}" \
                                  --request POST \
                                  --data '${secretsJson}' \
-                                 ${VAULT_ADDR}/v1/kv/data/projects/${APPLICATION_NAME}/db
+                                 http://${VAULT_INNER_IP}:${DOCKER_REGISTRY_PORT}/v1/kv/data/projects/${APPLICATION_NAME}/db
                         """
                     }
                 }
@@ -325,8 +351,18 @@ pipelineJob("${APPLICATION_NAME} - build and deploy") {
 }
 
 def setupDatabase(dbName, dbUserName, dbUserPassword) {
-    echo '${dbUserPassword}'
+    def schemaName = env.APPLICATION_NAME.replaceAll('-', '_')
     sh """
-    ssh -o StrictHostKeyChecking=no ${env.USER}@${env.SERVER_HOST} "docker exec ${env.POSTGRES_CONTAINER_NAME} psql -U ${env.DB_ADMIN_USER} -d ${dbName} -c \\"CREATE USER ${dbUserName} WITH PASSWORD '${dbUserPassword}'; CREATE SCHEMA IF NOT EXISTS ${env.APPLICATION_NAME}; ALTER SCHEMA ${env.APPLICATION_NAME} OWNER TO ${dbUserName}; GRANT ALL PRIVILEGES ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT CONNECT ON DATABASE ${dbName} TO ${dbUserName}; GRANT USAGE ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT CREATE ON SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${env.APPLICATION_NAME} TO ${dbUserName}; ALTER DEFAULT PRIVILEGES IN SCHEMA ${env.APPLICATION_NAME} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${dbUserName}; ALTER ROLE ${dbUserName} SET search_path TO ${env.APPLICATION_NAME};\\""
+    ssh -o StrictHostKeyChecking=no ${env.USER}@${env.SERVER_HOST} "docker exec ${env.POSTGRES_CONTAINER_NAME} psql -U ${env.DB_ADMIN_USER} -d ${dbName} -c \\"
+    CREATE USER ${dbUserName} WITH PASSWORD '${dbUserPassword}'; \\
+    CREATE SCHEMA IF NOT EXISTS ${schemaName}; \\
+    ALTER SCHEMA ${schemaName} OWNER TO ${dbUserName}; \\
+    GRANT ALL PRIVILEGES ON SCHEMA ${schemaName} TO ${dbUserName}; \\
+    GRANT CONNECT ON DATABASE ${dbName} TO ${dbUserName}; \\
+    GRANT USAGE ON SCHEMA ${schemaName} TO ${dbUserName}; \\
+    GRANT CREATE ON SCHEMA ${schemaName} TO ${dbUserName}; \\
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schemaName} TO ${dbUserName}; \\
+    ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${dbUserName}; \\
+    ALTER ROLE ${dbUserName} SET search_path TO ${schemaName};\\""
     """
 }
