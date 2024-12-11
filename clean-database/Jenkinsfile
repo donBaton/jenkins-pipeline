@@ -1,0 +1,49 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'prod'], description: 'Select environment')
+        string(name: 'APPLICATION_NAME', defaultValue: '', description: 'Enter application name')
+    }
+
+    environment {
+        USER = '<jenkins user>'
+        SERVER_HOST = '<server host>'
+        POSTGRES_CONTAINER_NAME = '<pg_database>'
+        DB_ADMIN_USER = '<db admin user>'
+    }
+
+    stages {
+        stage('Run database cleaning') {
+            steps {
+                sshagent(['nas']) {
+                    script {
+
+                        def schemaName = "${params.APPLICATION_NAME.replaceAll('-', '_')}"
+                        def dbUserName = "${params.APPLICATION_NAME.replaceAll('-', '_')}_owner_${params.ENVIRONMENT}"
+                        def dbName = params.ENVIRONMENT
+
+                        echo "Cleaning up database ${dbName}. Schema: ${schemaName}, user: ${dbUserName}"
+
+                        def rollbackSQL = """
+                            REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schemaName} FROM ${dbUserName}; \\
+                            REVOKE USAGE ON SCHEMA ${schemaName} FROM ${dbUserName}; \\
+                            REVOKE CREATE ON SCHEMA ${schemaName} FROM ${dbUserName}; \\
+                            REVOKE CONNECT ON DATABASE ${dbName} FROM ${dbUserName}; \\
+                            ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM ${dbUserName}; \\
+                            ALTER ROLE ${dbUserName} RESET search_path; \\
+                            ALTER SCHEMA ${schemaName} OWNER TO ${env.DB_ADMIN_USER}; \\
+                            DROP SCHEMA IF EXISTS ${schemaName} CASCADE; \\
+                            DROP ROLE IF EXISTS ${dbUserName}; \\
+                        """
+
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.SERVER_HOST} "docker exec ${env.POSTGRES_CONTAINER_NAME} psql -U ${env.DB_ADMIN_USER} -d ${dbName} -c \\"
+                            ${rollbackSQL}\\""
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
